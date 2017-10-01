@@ -7,7 +7,7 @@ This project implements a very simple stock market into which the users should u
 
 ## Motivation
 
-The purpose of this project is for me to acquire and develop skills on the Flask framework and with the MongoDB database.
+The purpose of this project is for me to acquire and develop skills on the Flask framework with the MongoDB database.
 
 ## Dependencies
 
