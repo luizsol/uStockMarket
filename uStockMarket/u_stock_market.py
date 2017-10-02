@@ -1,5 +1,49 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+"""A micro Stock Market Simulator.
+
+This module implements the internal's of a Stock Exchange.
+
+The main interaction with this module should be made through the StockExchange
+class and it's methods since most of the logic is inside it.
+
+Avoid writing data to the u_stock_market database without the use of the
+StockExchange methods at all costs as to avoid data inconsistencies.
+
+Attributes:
+    DB_NAME (str): the name of the mongodb database to be used by the
+         application
+    LOG_FILE (str): the default name of the log file
+    log (logging): the module's logging object
+
+Todo:
+    * Implement the user defined log output on the StockExchange constructor
+    * Implement the user defined optional log level
+    * Change the `except Exception:` statements to catch only database related
+        exceptions
+    * Make the StockExchange methods return standarized dicts instead of
+        objects
+    * Improve the validation on the creation methods of the StockExchange class
+    * Test thread safety
+    * Implement the trader's portfolio history
+    * Implement the wallet history updating
+
+Future features:
+    * Implement short position support
+
+
+.. _uStockMarket Project:
+    https://github.com/luizsol/uStockMarket
+
+"""
+
+__author__ = 'Luiz Sol'
+__license__ = 'GPL'
+__version__ = '0.0.1'
+__date__ = '2017-10-01'
+__maintainer__ = 'Luiz Sol'
+__email__ = 'luizedusol@gmail.com'
+__status__ = 'Development'
 
 from datetime import datetime
 import logging
@@ -16,7 +60,18 @@ LOG_FILE = 'u_stock_market.log'
 
 
 def _new_log(log_file=None):
-    # Source: https://docs.python.org/2.3/lib/node304.html
+    """Generates and prepares a logging object.
+
+    Keyword Args:
+        log_file (str, default=None): The file path of the log file.
+
+    Returns:
+        logging: A pre configured logging object.
+
+    .. _Source:
+        https://docs.python.org/2.3/lib/node304.html
+
+    """
     log = logging.getLogger('u_stock_market')
     if log_file is None:
         log_file = LOG_FILE
@@ -35,10 +90,39 @@ connect(DB_NAME)
 
 
 class StockExchange():
-    """docstring for StockExchange"""
+    """The Stock Exchange backend.
+
+    This class is the interface through wich all users should interact with the
+    System.
+
+    In this class methods the trader can perform the most common interactions
+    of regular stock exchanges, such as sending orders, fetching his portfolio
+    position etc.
+
+    Besides that and maintaining the data consistency, in order to make the
+    simulation the most realistic possible, these class methods remove from the
+    query result all data that wouldn't be available on a real situation to the
+    trader that is sending the request.
+
+    The direct use of the other classes in this module is only advised to the
+    users that want to have a more complete market view.
+
+    """
 
     def __init__(self, clean_start=True, log_file=None, debug_mode=True,
                  tickers=None):
+        """The class constructor.
+
+        Keyword Args:
+            clean_start (bool, default=True): Whether the database should be
+                erased before running the system.
+            log_file (str, default=None): The file name into which the log must
+                be saved. If `None` the log will be saved on the default file.
+            debug_mode (bool, default=True): If True the log level will be set
+                to logging.DEBUG. If false, the log level will me set to
+                logging.INFO.
+
+        """
         log.info('Starting stock exchange')
 
         if clean_start:
@@ -49,25 +133,58 @@ class StockExchange():
             if tickers is None:
                 log.info('Generating random tickers')
                 for i in range(0, random.randint(1, 100)):
-                    while self.register_ticker(self._random_ticker()) is None:
+                    while self.register_security(self._random_ticker()) \
+                            is None:
                         pass
 
             else:
                 log.info('Generating tickers')
                 for ticker in tickers:
-                    self.register_ticker(ticker)
+                    self.register_security(ticker)
 
-    def _random_ticker(self, num_letters=4):
-        letters = ''.join(random.choices(string.ascii_uppercase, k=4))
-        digits = ''.join(random.choices(string.digits, k=2))
+    def _random_ticker(self, num_letters=4, num_digits=2):
+        """Generates a random security code (ticker).
+
+        The generated ticker will have the form <letters><numbers>.
+
+        Examples:
+            AAKL32, BSUE34, NDUR09
+
+        Keyword Args:
+            num_letters (int, default=4): The number of letters to be used on
+                the ticker.
+            num_digits (int, default=2): The number of digits to be used on
+                the ticker.
+
+        Returns:
+            str: the random ticker.
+
+        """
+        letters = ''.join(random.choices(string.ascii_uppercase,
+                                         k=num_letters))
+
+        digits = ''.join(random.choices(string.digits, k=num_digits))
 
         return letters + digits
 
     def clean_history(self):
+        """Erases all the module's database"""
         connection = get_connection()
         connection.drop_database(DB_NAME)
 
-    def register_ticker(self, ticker):
+    def register_security(self, ticker):
+        """Creates a new OrderBook for a security.
+
+        This is the method through wich a new security must be created.
+
+        Args:
+            ticker (str): The security code (ticker).
+
+        Returns:
+            None if a security with the same ticker already exists, the
+            security's OrderBook otherwise.
+
+        """
         try:
             OrderBook.objects.get(ticker=ticker)
             return None
@@ -77,12 +194,33 @@ class StockExchange():
             return order_book
 
     def register_trader(self, name, wallet=None, portfolio=None):
+        """Registers a new trader.
+
+        This is the method through wich a new trader must be created.
+
+        Args:
+            name (str): The trader's name.
+
+        Keyword Args:
+            wallet (Decimal, default=None): The inital ammount of money of the
+                trader. If set to None a random value (with a Chi Squared
+                distribution) will be assigned to the trader's initial wallet.
+            portfolio(list(Position), default=None): The initial porfolio of
+                the trader. If set to None a random porfolio of all available
+                securities (with a Chi Squared distribution) will be assigned
+                to the trader.
+
+        Returns:
+            None if a trader with the same name already exists, the Trader
+            object otherwise.
+
+        """
         log.info('Registering new trader')
         try:
             Trader.objects.get(name=name)
             log.info('Name %s already exists. Aborting trader registration',
                      name)
-            return False
+            return None
         except Exception:
             pass
 
@@ -108,6 +246,34 @@ class StockExchange():
 
 
 class Fill(Document):
+    """Represents an order fill via the Mongoengine ORM.
+
+    A fill is the action of completing or satisfying an order for a security or
+    commodity. It is the basic act in transacting stocks, bonds or any other
+    type of security.
+
+    An order may take many fills to be satisfied.
+
+    Example:
+        If a trader places a buy order for a stock at $50 and a seller agrees
+        to the price, the sale has been made and the order has been filled.
+        The $50 price is the execution price, which also makes it the fill
+        price - it is the price that allows the transaction to be completed.
+
+    Attributes:
+        order (Order): The order that this fill totally or partially satisfied.
+        seller (Trader): The trader that sold it's securities and generated
+            this fill.
+        buyer (Trader): The trader that bought the securities and generated
+            this fill.
+        size (int): The size of the fill.
+        price (Decimal): The price of the fill.
+        time (datetime): The time in which the fill was created.
+
+    .. _Fill definition on Investopedia:
+        http://www.investopedia.com/terms/f/fill.asp
+
+    """
     order = ReferenceField('Order', required=True)
     seller = ReferenceField('Trader', required=True)
     buyer = ReferenceField('Trader', required=True)
@@ -121,9 +287,33 @@ class Fill(Document):
 
 
 class Position(Document):
+    """Represents a trader position via the Mongoengine ORM.
+
+    A position is the amount of a security  that is owned (a long position) or
+    borrowed and then sold (a short position, not supported yet) by a trader.
+
+    Attributes:
+        trader (Trader): The trader who owns the position.
+        order_book (OrderBook): The order book of the security which this
+            position represents.
+        shares (int): The size of the position.
+
+    .. _Position definition on Investopedia:
+        http://www.investopedia.com/terms/p/position.asp
+
+    """
     trader = ReferenceField('Trader', required=True)
     order_book = ReferenceField('OrderBook', required=True)
     shares = IntField(default=0, required=True)
+
+    @property
+    def value(self):
+        """(Decimal) The position value virtual attribute getter."""
+        mkt_p = self.order_book.get_market_price()
+        if market_price is not None:
+            return Decimal(self.shares * mkt_p)
+
+        return Decimal('0.00')
 
     def __repr__(self):
         return 'Position(trader=%s, ticker=%s, shares=%s)' % \
@@ -131,6 +321,13 @@ class Position(Document):
 
 
 class ValueDatum(EmbeddedDocument):
+    """Represents a generic time series Decimal datum via the Mongoengine ORM.
+
+    Attributes:
+        value (Decimal): The datum value.
+        time (datetime): The datum time.
+
+    """
     value = DecimalField(min_value=0.01, precision=2, required=True)
     time = DateTimeField(required=True)
 
@@ -139,6 +336,23 @@ class ValueDatum(EmbeddedDocument):
 
 
 class Trader(Document):
+    """Represents a trader via the Mongoengine ORM.
+
+    A trader is an individual who engages in the buying and selling of
+    financial assets in any financial market, either for himself or on behalf
+    of another person or institution.
+
+    Attributes:
+        name (str): The name of the trader.
+        wallet (Decimal): The ammout of money that the trader has.
+        wallet_history (list(ValueDatum)): The history of the trader's wallet.
+        portfolio (Portfolio): The trader's portfolio.
+        order (list(Order)): A list with all the orders sent by the trader.
+
+    .. _Trader definition on Investopedia:
+        http://www.investopedia.com/terms/t/trader.asp
+
+    """
     name = StringField(max_length=50, unique=True, required=True)
 
     wallet = DecimalField(default=0,
@@ -150,14 +364,16 @@ class Trader(Document):
 
     orders = ListField(ReferenceField('Order'))
 
-    @classmethod
-    def post_save(self, sender, document, **kwargs):
+    def update_wallet_history(self):
+        # TODO Documentation
         if self.wallet != self.wallet_history.objects.order_by('-time').value:
             self.wallet_history += [ValueDatum(time=datetime.now(),
                                                value=self.wallet)]
+            self.save()
 
     def send_order(self, ticker, side, size, price=None,
                    market_order=False):
+        # TODO Documentation
         log.info('Sending order:\nTrader: %s, Ticker: %s, Side: %s, '
                  'Size: %s, Price: %s, Market_order: %s', self.name, ticker,
                  side, size, price, market_order)
@@ -188,10 +404,13 @@ class Trader(Document):
         return order
 
     def update_wallet(self, value):
+        # TODO Documentation
         self.wallet += value
         self.save()
+        self.update_wallet_history()
 
     def get_portfolio_value(self):
+        # TODO Documentation
         t_value = Decimal('0.00')
 
         for position in self.portfolio:
@@ -210,7 +429,7 @@ class Trader(Document):
 
 
 class Order(Document):
-    """docstring for Order"""
+    # TODO Documentation
     trader = ReferenceField('Trader', required=True)
     order_book = ReferenceField('OrderBook', required=True)
     original_size = IntField(min_value=1, required=True)
@@ -224,6 +443,7 @@ class Order(Document):
     order_type = StringField(choices=('Bid', 'Ask'), required=True)
 
     def match(self, order, market_price=None):
+        # TODO Documentation
         log.info('Matching orders %s and %s.', repr(self), repr(order))
         # Were any of the orders cancelled or filled?
         if self.canceled or self.filled or order.canceled or order.filled:
@@ -353,11 +573,13 @@ class Order(Document):
 
 
 class OrderBook(Document):
+    # TODO Documentation
     ticker = StringField(max_length=50, unique=True)
     price_history = ListField(EmbeddedDocumentField(ValueDatum))
     # _mutex = False
 
     def try_match(self):
+        # TODO Documentation
         log.info('Trying to mach orders on the book %s.', repr(self))
         top_bid = self.get_top_bid()
         top_ask = self.get_top_ask()
@@ -378,6 +600,7 @@ class OrderBook(Document):
                      repr(self))
 
     def get_top_bid(self, force_price=False):
+        # TODO Documentation
         log.debug('Searchig for top bid on the book %s.', repr(self))
 
         log.debug('Searchig for top market price bid on the book %s.',
@@ -388,7 +611,7 @@ class OrderBook(Document):
 
             return Order.objects(
                 order_book=self, order_type='Bid', canceled=False,
-                filled=False, market_order=True).order_by('-time',
+                filled=False, market_order=True).order_by('time',
                                                           '-current_size')[0]
 
         except Exception:
@@ -400,34 +623,35 @@ class OrderBook(Document):
         try:
             return Order.objects(
                 order_book=self, order_type='Bid', canceled=False,
-                filled=False).order_by('-price', '-time', '-current_size')[0]
+                filled=False).order_by('-price', 'time', '-current_size')[0]
 
         except Exception:
             log.debug('Couldn\'t fid top bid on the book %s.', repr(self))
             return None
 
     def get_top_ask(self, force_price=False):
+        # TODO Documentation
         try:
             if force_price:
                 raise Exception
 
             return Order.objects(
                 order_book=self, order_type='Ask', canceled=False,
-                filled=False, market_order=True).order_by('-time',
+                filled=False, market_order=True).order_by('time',
                                                           '-current_size')[0]
 
         except Exception:
             try:
                 return Order.objects(
                     order_book=self, order_type='Ask', canceled=False,
-                    filled=False).order_by('price', '-time',
+                    filled=False).order_by('price', 'time',
                                            '-current_size')[0]
 
             except Exception:
                 return None
 
     def get_market_price(self):
-
+        # TODO Documentation
         if len(self.price_history) > 0:
             return self.price_history[-1].value
         else:
