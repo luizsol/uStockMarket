@@ -27,6 +27,7 @@ Todo:
     * Test thread safety
     * Implement the trader's portfolio history
     * Implement the wallet history updating
+    * Use module constants to represent Bid and Ask orders
 
 Future features:
     * Implement short position support
@@ -40,7 +41,7 @@ Future features:
 __author__ = 'Luiz Sol'
 __license__ = 'GPL'
 __version__ = '0.0.1'
-__date__ = '2017-10-01'
+__date__ = '2017-10-02'
 __maintainer__ = 'Luiz Sol'
 __email__ = 'luizedusol@gmail.com'
 __status__ = 'Development'
@@ -365,7 +366,7 @@ class Trader(Document):
     orders = ListField(ReferenceField('Order'))
 
     def update_wallet_history(self):
-        # TODO Documentation
+        """Updates the wallet_history time series."""
         if self.wallet != self.wallet_history.objects.order_by('-time').value:
             self.wallet_history += [ValueDatum(time=datetime.now(),
                                                value=self.wallet)]
@@ -373,7 +374,24 @@ class Trader(Document):
 
     def send_order(self, ticker, side, size, price=None,
                    market_order=False):
-        # TODO Documentation
+        """Sends an order on behalf of the trader.
+
+        Args:
+            ticker (str): The security code (ticker).
+            side (str): If 'buy' will send an Bid order, if 'sell' will send an
+                Ask order.
+            size (int): The size of the order.
+
+        Keyword Args:
+            price (Decimal, default=None): The price of the order. May be left
+                as None just in the case of a `at market price` order.
+            market_order (bool, default=False): Whether the order is a `at
+                market price` order.
+
+        Returns:
+            None if the security doesn't exist, the sent order otherwise.
+
+        """
         log.info('Sending order:\nTrader: %s, Ticker: %s, Side: %s, '
                  'Size: %s, Price: %s, Market_order: %s', self.name, ticker,
                  side, size, price, market_order)
@@ -403,14 +421,20 @@ class Trader(Document):
 
         return order
 
-    def update_wallet(self, value):
-        # TODO Documentation
-        self.wallet += value
+    def update_wallet(self, delta):
+        """Adds a value to the trader's wallet.
+
+        Args:
+            delta (Decimal): The ammout of money to be added to the trader's
+                wallet.
+
+        """
+        self.wallet += delta
         self.save()
         self.update_wallet_history()
 
     def get_portfolio_value(self):
-        # TODO Documentation
+        """(Decimal) Gets the current value of the trader's portfolio."""
         t_value = Decimal('0.00')
 
         for position in self.portfolio:
@@ -429,7 +453,32 @@ class Trader(Document):
 
 
 class Order(Document):
-    # TODO Documentation
+    """Represents an order via the Mongoengine ORM.
+
+    An order is a trader's instructions to purchase or sell a security.
+
+    Attributes:
+        trader (Trader): The trader who sent the order.
+        order_book (OrderBook): The order book into which this order was
+            placed.
+        original_size (int): The size of the order at it's creation.
+        current_size (int): The current size of the order, which is defined by
+            the order's original size minus the total size of all this order's
+            partial fills.
+        time (datetime): The time in which the order was sent.
+        price (Decimal): The order's price.
+        market_order (bool): Whether the order should be executed at the
+            current market price or at a fixed price.
+        canceled (bool): Whether an order was cancelled.
+        filled (bool): Whether an order was already fully filled.
+        fills (list(Fill)): The list of fills associated with this order.
+        order_type (str): Whether this order is a Bid (buy) or an Ask (sell).
+
+
+    .. _Order definition on Investopedia:
+        http://www.investopedia.com/terms/o/order.asp
+
+    """
     trader = ReferenceField('Trader', required=True)
     order_book = ReferenceField('OrderBook', required=True)
     original_size = IntField(min_value=1, required=True)
@@ -443,7 +492,36 @@ class Order(Document):
     order_type = StringField(choices=('Bid', 'Ask'), required=True)
 
     def match(self, order, market_price=None):
-        # TODO Documentation
+        """Tries to match two orders with each other.
+
+        Every time the order book recieve a new order it will try to match the
+        top Bid order with the top Ask order through this method.
+
+        The matching of two orders demands that:
+            * Both orders are on the same order book.
+            * None of them were cancelled or filled.
+            * Both order are on oposite sides (one is an Ask and the other is a
+                Bid).
+            * Both orders have the same price or at least one of them is an `at
+                market price` order.
+            * The buyier can pay for the transaction.
+            * The seller has the securities.
+
+        If any of the above conditions is not met the matching will fail.
+
+        Args:
+            order (Order): the order with wich this order will attempt a match.
+
+        Keyword Args:
+            market_price (Decimal, default=None): If both orders are `at market
+                price` orders this method will use this parameter as the fill
+                price.
+
+        Returns:
+            False if it isn't possible to match both orders, the generated fill
+            object otherwise.
+
+        """
         log.info('Matching orders %s and %s.', repr(self), repr(order))
         # Were any of the orders cancelled or filled?
         if self.canceled or self.filled or order.canceled or order.filled:
@@ -573,13 +651,38 @@ class Order(Document):
 
 
 class OrderBook(Document):
-    # TODO Documentation
+    """Represents an order book via the Mongoengine ORM.
+
+    An order book is an electronic list of buy and sell orders for a specific
+    security or financial instrument, organized by price level. The order book
+    lists the number of shares being bid or offered at each price point, or
+    market depth. It also identifies the market participants behind the buy and
+    sell orders. The order book is dynamic and constantly updated in real time
+    throughout the day.
+
+    Attributes:
+        ticker (str): The security symbol.
+        price_history (list(ValueDatum)): The price time series of the security
+            being traded on this order book.
+
+
+    .. _Order book definition on Investopedia:
+        http://www.investopedia.com/terms/o/order-book.asp
+
+    """
     ticker = StringField(max_length=50, unique=True)
     price_history = ListField(EmbeddedDocumentField(ValueDatum))
-    # _mutex = False
 
     def try_match(self):
-        # TODO Documentation
+        """Tries to match the two top Ask and Bid orders.
+
+        This method should be executed every time a new order is placed on this
+        order book.
+
+        Note:
+            In the future, this method will be a callback of the save() method.
+
+        """
         log.info('Trying to mach orders on the book %s.', repr(self))
         top_bid = self.get_top_bid()
         top_ask = self.get_top_ask()
@@ -600,7 +703,23 @@ class OrderBook(Document):
                      repr(self))
 
     def get_top_bid(self, force_price=False):
-        # TODO Documentation
+        """Retrieves the top Bid order.
+
+        The top Bid order is determined lexicographically on the following
+        order:
+            * Active (neither cancelled nor filled) order
+            * `At market value` order
+            * Highest price order
+            * First order
+
+        Keyword Args:
+            force_price (bool, defautl=False): If True, the order sorting
+                algorithm will discard all `at market price` orders.
+
+        Returns:
+            None if no valid Bid order was found, the top Bid order otherwise.
+
+        """
         log.debug('Searchig for top bid on the book %s.', repr(self))
 
         log.debug('Searchig for top market price bid on the book %s.',
@@ -630,7 +749,23 @@ class OrderBook(Document):
             return None
 
     def get_top_ask(self, force_price=False):
-        # TODO Documentation
+        """Retrieves the top Ask order.
+
+        The top Aks order is determined lexicographically on the following
+        order:
+            * Active (neither cancelled nor filled) order
+            * `At market value` order
+            * Lowest price order
+            * First order
+
+        Keyword Args:
+            force_price (bool, defautl=False): If True, the order sorting
+                algorithm will discard all `at market price` orders.
+
+        Returns:
+            None if no valid Bid order was found, the top Ask order otherwise.
+
+        """
         try:
             if force_price:
                 raise Exception
@@ -651,7 +786,16 @@ class OrderBook(Document):
                 return None
 
     def get_market_price(self):
-        # TODO Documentation
+        """Determines the current market price.
+
+        The current market price is here defined as the price of the last fill
+        generated on this order book.
+
+        Returns:
+            None if no fill was yet generated, the current maket price
+            (Decimal) otherwise.
+
+        """
         if len(self.price_history) > 0:
             return self.price_history[-1].value
         else:
