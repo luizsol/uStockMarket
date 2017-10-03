@@ -28,6 +28,8 @@ Todo:
     * Implement the trader's portfolio history
     * Implement the wallet history updating
     * Use module constants to represent Bid and Ask orders
+    * Improve logging consistency and depth
+    * Add market depth info to the OrderBook.to_dict() method
 
 Future features:
     * Implement short position support
@@ -37,7 +39,6 @@ Future features:
     https://github.com/luizsol/uStockMarket
 
 """
-
 __author__ = 'Luiz Sol'
 __license__ = 'GPL'
 __version__ = '0.0.1'
@@ -210,6 +211,7 @@ class StockExchange():
         """Erases all the module's database"""
         connection = get_connection()
         connection.drop_database(DB_NAME)
+        return good_request('The database was erased.')
 
     def register_security(self, ticker):
         """Creates a new OrderBook for a security.
@@ -296,6 +298,62 @@ class StockExchange():
         return good_request({'tickers': [book.ticker for book in
                                          OrderBook.objects]})
 
+    def get_trader_status(self, name):  # TODO test!
+        try:
+            return good_request(Trader.objects.get(name=name).to_dict)
+        except Exception:
+            return bad_request('The trader doesn\'t exist.')
+
+    def send_order(self, trader, ticker, side, size, price=None,
+                   market_order=False):  # TODO test!
+        try:
+            trader = Trader.get(name=trader)
+        except Exception:
+            return bad_request('The trader doesn\'t exist.')
+
+        result = trader.send_order(ticker, side, size, price=price,
+                                   market_order=Market_order)
+
+        if result is not None:
+            return good_request(result.to_dict())
+
+        return bad_request('The order was refused.')
+
+    def edit_positions(self, positions):  # TODO test!
+        """Edits the portfolio positions of multiple traders.
+
+        Example:
+            {'John Doe': {'TTLB03': 334, 'JJBE32': 700, 'KKTB38': 1020},
+             'Bruce Wayne': {'TTLB03': 339823, 'LLCR33': 9000000}}
+
+        Args:
+            position (dict): A dict containing all the trader positions to be
+                edited.
+
+        Returns:
+            None if a trader with the same name already exists, the Trader
+            object otherwise.
+
+        """
+        if positions is None or not isinstance(positions, dict):
+            return bad_request('Invalid request.')
+
+        # Checking whether all keys on the dict are registered traders
+        try:
+            for trader in positions.keys():
+                Trader.objects.get(name=trader)
+                for ticker in positions[trader].keys():
+                    OrderBook.objects.get(ticker=ticker)
+        except Exception:
+            return bad_request('One of the traders or ticker is not '
+                               'registered.')
+
+        for trader in positions.keys():
+                Trader.objects.get(name=trader).update_portfolio(
+                    positions[trader])
+
+        return good_request('Positions updated successfully.')
+
 
 class Fill(Document):
     """Represents an order fill via the Mongoengine ORM.
@@ -333,10 +391,6 @@ class Fill(Document):
     price = DecimalField(min_value=0.01, precision=2, required=True)
     time = DateTimeField(default=datetime.now(), required=True)
 
-    def __repr__(self):
-        return 'Fill(seller=%s, buyer=%s, size=%s, price=%s)' % \
-            (self.seller.name, self.buyer.name, self.size, self.price)
-
     def to_dict(self):
         return {
             'order': str(self.order.id),
@@ -345,6 +399,10 @@ class Fill(Document):
             'size': str(self.size),
             'price': str(self.price),
             'time': str(self.time)}
+
+    def __repr__(self):
+        return 'Fill(seller=%s, buyer=%s, size=%s, price=%s)' % \
+            (self.seller.name, self.buyer.name, self.size, self.price)
 
 
 class Position(Document):
@@ -384,7 +442,8 @@ class Position(Document):
         return {
             'trader': str(self.trader.name),
             'ticker': str(self.order_book.ticker),
-            'shares': str(self.shares)}
+            'shares': str(self.shares),
+            'value': str(self.value)}
 
 
 class ValueDatum(EmbeddedDocument):
@@ -514,15 +573,6 @@ class Trader(Document):
 
         return t_value
 
-    def __repr__(self):
-        return 'Trader(name=%s, wallet=%s)' % (str(self.name),
-                                               str(self.wallet))
-
-    def __str__(self):
-        return 'Trader:\n\tName: %s\n\tWallet: %s\n\tPortfolio: \n\t\t%s' % \
-               (self.name, self.wallet,
-                '\n\t\t'.join([repr(position) for position in self.portfolio]))
-
     def to_dict(self):
         return {
             'name': self.name,
@@ -532,6 +582,27 @@ class Trader(Document):
             'portfolio': [position.to_dict() for position in self.portfolio],
             'portfolio_value': str(self.get_portfolio_value()),
             'orders': [order.to_dict() for order in self.orders]}
+
+    def update_portfolio(self, new_positions):  # TODO test!
+        for key, value in new_positions.items():
+            book = OrderBook.objects.get(ticker=key)
+            try:
+                position = Position.objects.get(order_book=book, trader=self)
+                position.shares = int(value)
+            except Exception:
+                position = Position(order_book=book, trader=self,
+                                    shares=int(value))
+
+            position.save()
+
+    def __repr__(self):
+        return 'Trader(name=%s, wallet=%s)' % (str(self.name),
+                                               str(self.wallet))
+
+    def __str__(self):
+        return 'Trader:\n\tName: %s\n\tWallet: %s\n\tPortfolio: \n\t\t%s' % \
+               (self.name, self.wallet,
+                '\n\t\t'.join([repr(position) for position in self.portfolio]))
 
 
 class Order(Document):
@@ -725,12 +796,6 @@ class Order(Document):
 
         return fill
 
-    def __repr__(self):
-        return 'Order(trader=%s, ticker=%s, current_size=%s, price=%s, ' \
-               'market_order=%s, order_type=%s)' % \
-               (self.trader.name, self.order_book.ticker, self.current_size,
-                self.price, self.market_order, self.order_type)
-
     def to_dict(self):
         return {
             'trader': str(self.trader.name),
@@ -744,6 +809,12 @@ class Order(Document):
             'filled': str(self.filled),
             'fills': [fill.to_dict() for fill in self.fills],
             'order_type': str(self.order_type)}
+
+    def __repr__(self):
+        return 'Order(trader=%s, ticker=%s, current_size=%s, price=%s, ' \
+               'market_order=%s, order_type=%s)' % \
+               (self.trader.name, self.order_book.ticker, self.current_size,
+                self.price, self.market_order, self.order_type)
 
 
 class OrderBook(Document):
@@ -925,6 +996,7 @@ class OrderBook(Document):
         return result
 
     def to_dict(self):
+        # TODO add market depth info
         return{
             'ticker': self.ticker,
             'price_history': [datum.to_dict() for datum in self.price_history]}
