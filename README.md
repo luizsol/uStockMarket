@@ -27,11 +27,13 @@ The system as a hole is comprised of 3 parts:
 - ***uHomeBroker***: a program that emulates a simple home broker so the user can see the stock market data and send his own orders
 
 ### ***uStockMarket*** usage
+***Work in progress***
 
 ### ***uTraders*** usage
+***Work in progress***
 
 ### ***uHomeBroker*** usage
-
+***Work in progress***
 
 
 

@@ -300,19 +300,19 @@ class StockExchange():
 
     def get_trader_status(self, name):  # TODO test!
         try:
-            return good_request(Trader.objects.get(name=name).to_dict)
+            return good_request(Trader.objects.get(name=name).to_dict())
         except Exception:
             return bad_request('The trader doesn\'t exist.')
 
     def send_order(self, trader, ticker, side, size, price=None,
                    market_order=False):  # TODO test!
         try:
-            trader = Trader.get(name=trader)
+            trader = Trader.objects.get(name=trader)
         except Exception:
             return bad_request('The trader doesn\'t exist.')
 
         result = trader.send_order(ticker, side, size, price=price,
-                                   market_order=Market_order)
+                                   market_order=market_order)
 
         if result is not None:
             return good_request(result.to_dict())
@@ -429,7 +429,7 @@ class Position(Document):
     def value(self):
         """(Decimal) The position value virtual attribute getter."""
         mkt_p = self.order_book.get_market_price()
-        if market_price is not None:
+        if mkt_p is not None:
             return Decimal(self.shares * mkt_p)
 
         return Decimal('0.00')
@@ -546,6 +546,9 @@ class Trader(Document):
 
         order.save()
 
+        self.orders += [order]
+        self.save()
+
         log.info('Order sent! (%s)', repr(order))
         book.try_match()
 
@@ -583,7 +586,7 @@ class Trader(Document):
             'portfolio_value': str(self.get_portfolio_value()),
             'orders': [order.to_dict() for order in self.orders]}
 
-    def update_portfolio(self, new_positions):  # TODO test!
+    def update_portfolio(self, new_positions):
         for key, value in new_positions.items():
             book = OrderBook.objects.get(ticker=key)
             try:
@@ -594,6 +597,11 @@ class Trader(Document):
                                     shares=int(value))
 
             position.save()
+
+            if position not in self.portfolio:
+                self.portfolio += [position]
+
+            self.save()
 
     def __repr__(self):
         return 'Trader(name=%s, wallet=%s)' % (str(self.name),
@@ -637,7 +645,7 @@ class Order(Document):
     original_size = IntField(min_value=1, required=True)
     current_size = IntField(required=True)
     time = DateTimeField(default=datetime.now(), required=True)
-    price = DecimalField(min_value=0.01, precision=2, required=True)
+    price = DecimalField(min_value=0.01, precision=2)
     market_order = BooleanField(default=False, required=True)
     canceled = BooleanField(default=False, required=True)
     filled = BooleanField(default=False, required=True)

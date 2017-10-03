@@ -59,7 +59,7 @@ api.add_resource(RegisterTrader, '/register_trader')
 
 
 # -Get trader status
-class TraderStatus(Resource):  # TODO test!
+class TraderStatus(Resource):
     def get(self, name):
         log.debug('/trader_status/%s (get): ' % (name))
         return sx.get_trader_status(name)
@@ -87,14 +87,14 @@ send_order_parser.add_argument('market_order', type=bool, help='Whether the '
                                '(optional)')
 
 
-class SendOrder(Resource):  # TODO test!
+class SendOrder(Resource):
     def put(self):
         args = send_order_parser.parse_args()
-        if 'price' in args.keys():
+        if args['price'] is not None:
             args['price'] = Decimal(args['price'])
 
         log.debug('/send_order (put): ' + str(args))
-        return sx.register_trader(**args)
+        return sx.send_order(**args)
 
     def post(self):
         return self.put()
@@ -105,7 +105,7 @@ api.add_resource(SendOrder, '/send_order')
 # -Assign equities to multiple traders
 
 
-class EditPositions(Resource):  # TODO test!
+class EditPositions(Resource):
     def put(self):
         args = request.get_json()
         log.debug('/edit_positions (put): ' + str(args))
