@@ -14,6 +14,7 @@ The purpose of this project is for me to acquire and develop skills on the Flask
 - MongoDB
 - Python 3.6
 	- flask-0.12.2
+	- flask-restful 0.3.6
 	- pymongo-3.5.1
 	- mongoengine-0.13.0
 

@@ -47,6 +47,7 @@ __email__ = 'luizedusol@gmail.com'
 __status__ = 'Development'
 
 from datetime import datetime
+from decimal import Decimal
 import logging
 import random
 import string
@@ -83,6 +84,43 @@ def _new_log(log_file=None):
     log.addHandler(hdlr)
     log.setLevel(logging.DEBUG)
     return log
+
+
+def bad_request(message):
+    """(dict, status) Returns a default error dict with a specified message."""
+    return {'success': False, 'message': message}, 400
+
+
+def good_request(data):
+    """(dict, status) Returns a default success dict with a specified data."""
+    return {'success': True, 'data': data}, 200
+
+
+def dict_to_porfolio(trader, portfolio):
+    """Generates a trader portfolio based on a dict.
+
+    The dict should be formatted as ticker: amount
+
+    Examples:
+        {"JBS02": 123, "LLC33": 223.23}
+
+    Args:
+        trader (Trader): The trader of the portfolio being created.
+        porfolio (dict): The dict to be converted on a portfolio.
+
+    Returns:
+        False if one of the dict ticker is not registered in any OrderBook, the
+        list of positions representing the trader's portfolio otherwise.
+
+    """
+    result = []
+    for ticker, shares in portfolio.items():
+        try:
+            book = OrderBook.objects.get(ticker=ticker)
+            result += [Position(trader=trader, order_book=book, shares=shares)]
+        except Exception:
+            return False
+    return result
 
 
 log = _new_log()
@@ -203,13 +241,14 @@ class StockExchange():
             name (str): The trader's name.
 
         Keyword Args:
-            wallet (Decimal, default=None): The inital ammount of money of the
+            wallet (Decimal, default=None): The inital amount of money of the
                 trader. If set to None a random value (with a Chi Squared
                 distribution) will be assigned to the trader's initial wallet.
-            portfolio(list(Position), default=None): The initial porfolio of
+            portfolio(dict, default=None): The initial porfolio of
                 the trader. If set to None a random porfolio of all available
                 securities (with a Chi Squared distribution) will be assigned
-                to the trader.
+                to the trader. Example of initial portfolio representation:
+                {"JBS02": 123, "LLC33": 223.23}
 
         Returns:
             None if a trader with the same name already exists, the Trader
@@ -221,7 +260,7 @@ class StockExchange():
             Trader.objects.get(name=name)
             log.info('Name %s already exists. Aborting trader registration',
                      name)
-            return None
+            return bad_request('The %s trader already exists.' % (name))
         except Exception:
             pass
 
@@ -231,7 +270,15 @@ class StockExchange():
         trader = Trader(name=name, wallet=wallet).save()
 
         if portfolio is not None:
-            trader.portfolio = portfolio
+            portfolio = dict_to_porfolio(trader, portfolio)
+            if portfolio:
+                for position in portfolio:
+                    position.save()
+
+                trader.portfolio = portfolio
+            else:
+                trader.delete()
+                return bad_request('Invalid portfolio.')
         else:
             trader.portfolio = []
             for book in OrderBook.objects:
@@ -243,7 +290,11 @@ class StockExchange():
 
         trader.save()
         log.info('%s created!', repr(trader))
-        return trader
+        return good_request(trader.to_dict())
+
+    def list_tickers(self):
+        return good_request({'tickers': [book.ticker for book in
+                                         OrderBook.objects]})
 
 
 class Fill(Document):
@@ -286,6 +337,15 @@ class Fill(Document):
         return 'Fill(seller=%s, buyer=%s, size=%s, price=%s)' % \
             (self.seller.name, self.buyer.name, self.size, self.price)
 
+    def to_dict(self):
+        return {
+            'order': str(self.order.id),
+            'seller': str(self.seller.name),
+            'buyer': str(self.buyer.name),
+            'size': str(self.size),
+            'price': str(self.price),
+            'time': str(self.time)}
+
 
 class Position(Document):
     """Represents a trader position via the Mongoengine ORM.
@@ -320,6 +380,12 @@ class Position(Document):
         return 'Position(trader=%s, ticker=%s, shares=%s)' % \
             (self.trader.name, self.order_book.ticker, self.shares)
 
+    def to_dict(self):
+        return {
+            'trader': str(self.trader.name),
+            'ticker': str(self.order_book.ticker),
+            'shares': str(self.shares)}
+
 
 class ValueDatum(EmbeddedDocument):
     """Represents a generic time series Decimal datum via the Mongoengine ORM.
@@ -335,6 +401,11 @@ class ValueDatum(EmbeddedDocument):
     def __repr__(self):
         return '[' + str(time) + '] ' + str(value)
 
+    def to_dict(self):
+        return {
+            'value': str(self.value),
+            'time': str(self.time)}
+
 
 class Trader(Document):
     """Represents a trader via the Mongoengine ORM.
@@ -348,7 +419,7 @@ class Trader(Document):
         wallet (Decimal): The ammout of money that the trader has.
         wallet_history (list(ValueDatum)): The history of the trader's wallet.
         portfolio (Portfolio): The trader's portfolio.
-        order (list(Order)): A list with all the orders sent by the trader.
+        orders (list(Order)): A list with all the orders sent by the trader.
 
     .. _Trader definition on Investopedia:
         http://www.investopedia.com/terms/t/trader.asp
@@ -438,7 +509,8 @@ class Trader(Document):
         t_value = Decimal('0.00')
 
         for position in self.portfolio:
-            t_value += position.shares * position.order_book.get_market_price()
+            t_value += Decimal(position.shares) * \
+                position.order_book.get_market_price()
 
         return t_value
 
@@ -450,6 +522,16 @@ class Trader(Document):
         return 'Trader:\n\tName: %s\n\tWallet: %s\n\tPortfolio: \n\t\t%s' % \
                (self.name, self.wallet,
                 '\n\t\t'.join([repr(position) for position in self.portfolio]))
+
+    def to_dict(self):
+        return {
+            'name': self.name,
+            'wallet': str(self.wallet),
+            'wallet_history': [datum.to_dict() for datum in
+                               self.wallet_history],
+            'portfolio': [position.to_dict() for position in self.portfolio],
+            'portfolio_value': str(self.get_portfolio_value()),
+            'orders': [order.to_dict() for order in self.orders]}
 
 
 class Order(Document):
@@ -649,6 +731,20 @@ class Order(Document):
                (self.trader.name, self.order_book.ticker, self.current_size,
                 self.price, self.market_order, self.order_type)
 
+    def to_dict(self):
+        return {
+            'trader': str(self.trader.name),
+            'ticker': str(self.order_book.ticker),
+            'original_size': str(self.original_size),
+            'current_size': str(self.current_size),
+            'time': str(self.time),
+            'price': str(self.price),
+            'market_order': str(self.market_order),
+            'canceled': str(self.canceled),
+            'filled': str(self.filled),
+            'fills': [fill.to_dict() for fill in self.fills],
+            'order_type': str(self.order_type)}
+
 
 class OrderBook(Document):
     """Represents an order book via the Mongoengine ORM.
@@ -799,7 +895,7 @@ class OrderBook(Document):
         if len(self.price_history) > 0:
             return self.price_history[-1].value
         else:
-            return None
+            return Decimal('0.00')
 
     def __repr__(self):
         return 'OrderBook(ticker=' + self.ticker + ')'
@@ -827,3 +923,8 @@ class OrderBook(Document):
 
         result += '\tActive Asks: ' + str(total_aks) + '\n'
         return result
+
+    def to_dict(self):
+        return{
+            'ticker': self.ticker,
+            'price_history': [datum.to_dict() for datum in self.price_history]}
