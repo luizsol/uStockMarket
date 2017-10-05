@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """A micro Stock Market Simulator.
 
-This module implements the internal's of a Stock Exchange.
+This module implements the internals of a Stock Exchange.
 
 The main interaction with this module should be made through the StockExchange
 class and it's methods since most of the logic is inside it.
@@ -18,17 +18,13 @@ Attributes:
 
 Todo:
     * Implement the user defined log output on the StockExchange constructor
-    * Implement the user defined optional log level
     * Change the `except Exception:` statements to catch only database related
         exceptions
-    * Make the StockExchange methods return standarized dicts instead of
-        objects
-    * Improve the validation on the creation methods of the StockExchange class
     * Test thread safety
     * Implement the trader's portfolio history
-    * Implement the wallet history updating
     * Use module constants to represent Bid and Ask orders
     * Improve logging consistency and depth
+    * Improve the match() method implementation
     * Add market depth info to the OrderBook.to_dict() method
 
 Future features:
@@ -40,9 +36,9 @@ Future features:
 
 """
 __author__ = 'Luiz Sol'
-__license__ = 'GPL'
+__license__ = 'MIT'
 __version__ = '0.0.1'
-__date__ = '2017-10-02'
+__date__ = '2017-10-05'
 __maintainer__ = 'Luiz Sol'
 __email__ = 'luizedusol@gmail.com'
 __status__ = 'Development'
@@ -52,6 +48,8 @@ from decimal import Decimal
 import logging
 import random
 import string
+import threading
+import yaml
 
 import numpy as np
 from mongoengine import *
@@ -129,7 +127,7 @@ log = _new_log()
 connect(DB_NAME)
 
 
-class StockExchange():
+class StockExchange(threading.Thread):
     """The Stock Exchange backend.
 
     This class is the interface through wich all users should interact with the
@@ -147,10 +145,13 @@ class StockExchange():
     The direct use of the other classes in this module is only advised to the
     users that want to have a more complete market view.
 
+    It inherits from threading.Thread so it can perform the order matching
+    asynchronously.
+
     """
 
-    def __init__(self, clean_start=True, log_file=None, debug_mode=True,
-                 tickers=None):
+    def __init__(self, config_file=None, clean_start=True, log_file=None,
+                 debug_mode=True, tickers=None):
         """The class constructor.
 
         Keyword Args:
@@ -161,59 +162,45 @@ class StockExchange():
             debug_mode (bool, default=True): If True the log level will be set
                 to logging.DEBUG. If false, the log level will me set to
                 logging.INFO.
+            config_file (str): The path of the yaml configuration file.
 
         """
         log.info('Starting stock exchange')
+
+        threading.Thread.__init__(self)
+        # Running on deamon mode (so the tread is stopped when the user presses
+        # CTRL + C)
+        self.daemon = True
 
         if clean_start:
             log.info('Cleaning all market history')
 
             self.clean_history()
 
-            if tickers is None:
-                log.info('Generating random tickers')
-                for i in range(0, random.randint(1, 100)):
-                    while self.register_security(self._random_ticker()) \
-                            is None:
-                        pass
-
+            # The yaml file will be load only in clean starts
+            if config_file is not None:
+                self.yaml_load(config_file)
             else:
-                log.info('Generating tickers')
-                for ticker in tickers:
-                    self.register_security(ticker)
+                if tickers is None:
+                    log.info('Generating random tickers')
+                    for i in range(0, random.randint(1, 100)):
+                        while self.register_security(self._random_ticker()) \
+                                is None:
+                            pass
 
-    def _random_ticker(self, num_letters=4, num_digits=2):
-        """Generates a random security code (ticker).
-
-        The generated ticker will have the form <letters><numbers>.
-
-        Examples:
-            AAKL32, BSUE34, NDUR09
-
-        Keyword Args:
-            num_letters (int, default=4): The number of letters to be used on
-                the ticker.
-            num_digits (int, default=2): The number of digits to be used on
-                the ticker.
-
-        Returns:
-            str: the random ticker.
-
-        """
-        letters = ''.join(random.choices(string.ascii_uppercase,
-                                         k=num_letters))
-
-        digits = ''.join(random.choices(string.digits, k=num_digits))
-
-        return letters + digits
+                else:
+                    log.info('Generating tickers')
+                    for ticker in tickers:
+                        self.register_security(ticker)
 
     def clean_history(self):
         """Erases all the module's database"""
+        log.warning('Erasing database')
         connection = get_connection()
         connection.drop_database(DB_NAME)
         return good_request('The database was erased.')
 
-    def register_security(self, ticker):
+    def register_security(self, ticker):  # TODO integrate with the RESTful API
         """Creates a new OrderBook for a security.
 
         This is the method through wich a new security must be created.
@@ -226,13 +213,15 @@ class StockExchange():
             security's OrderBook otherwise.
 
         """
+        if not isinstance(ticker, str):
+            return bad_request('Ticker must be a string.')
         try:
             OrderBook.objects.get(ticker=ticker)
-            return None
+            return bad_request('The security already exists.')
         except Exception:
             order_book = OrderBook(ticker=ticker)
             order_book.save()
-            return order_book
+            return good_request(order_book.to_dict())
 
     def register_trader(self, name, wallet=None, portfolio=None):
         """Registers a new trader.
@@ -251,10 +240,6 @@ class StockExchange():
                 securities (with a Chi Squared distribution) will be assigned
                 to the trader. Example of initial portfolio representation:
                 {"JBS02": 123, "LLC33": 223.23}
-
-        Returns:
-            None if a trader with the same name already exists, the Trader
-            object otherwise.
 
         """
         log.info('Registering new trader')
@@ -291,35 +276,69 @@ class StockExchange():
                 trader.portfolio += [position.save()]
 
         trader.save()
-        log.info('%s created!', repr(trader))
+        log.info('%s trader created!', repr(trader))
         return good_request(trader.to_dict())
 
+    def list_traders(self):
+        """Lists all the registered traders."""
+        return good_request([trader.name for trader in Trader.objects])
+
     def list_tickers(self):
+        """Lists all the registered securities."""
         return good_request({'tickers': [book.ticker for book in
                                          OrderBook.objects]})
 
-    def get_trader_status(self, name):  # TODO test!
+    def get_trader_status(self, name):
+        """Retrieves a trader's status.
+
+        Args:
+            name (str): The trader's name.
+
+        """
         try:
             return good_request(Trader.objects.get(name=name).to_dict())
         except Exception:
             return bad_request('The trader doesn\'t exist.')
 
     def send_order(self, trader, ticker, side, size, price=None,
-                   market_order=False):  # TODO test!
+                   market_order=False):
+        """Sends an order.
+
+        Args:
+            trader (str): The trader's name.
+            ticker (str): The security code.
+            side (str): If 'buy' will send an Bid order, if 'sell' will send an
+                Ask order.
+            size (int): The size of the order.
+
+        Keyword Args:
+            price (Decimal, default=None): The price of the order. May be left
+                as None just in the case of a `at market price` order.
+            market_order (bool, default=False): Whether the order is a `at
+                market price` order.
+
+        """
+        log.info('Trying to send order (trader: %s, ticker: %s, side: %s, '
+                 'size: %s, price: %s, market_order: %s)', trader, ticker,
+                 side, size, price, market_order)
         try:
             trader = Trader.objects.get(name=trader)
         except Exception:
+            log.warning('Failed while sending order: The trader doesn\'t '
+                        'exists')
             return bad_request('The trader doesn\'t exist.')
 
         result = trader.send_order(ticker, side, size, price=price,
                                    market_order=market_order)
 
         if result is not None:
+            log.info('Order successfully sent.')
             return good_request(result.to_dict())
 
+        log.warning('Failed while sending order: The order was refused')
         return bad_request('The order was refused.')
 
-    def edit_positions(self, positions):  # TODO test!
+    def edit_positions(self, positions):
         """Edits the portfolio positions of multiple traders.
 
         Example:
@@ -330,12 +349,10 @@ class StockExchange():
             position (dict): A dict containing all the trader positions to be
                 edited.
 
-        Returns:
-            None if a trader with the same name already exists, the Trader
-            object otherwise.
-
         """
+        log.info('Editing positions:\n%s', str(positions))
         if positions is None or not isinstance(positions, dict):
+            log.warning('Failed while editing positions: wrong argument')
             return bad_request('Invalid request.')
 
         # Checking whether all keys on the dict are registered traders
@@ -345,6 +362,8 @@ class StockExchange():
                 for ticker in positions[trader].keys():
                     OrderBook.objects.get(ticker=ticker)
         except Exception:
+            log.warning('Failed while editing positions: One of the traders or'
+                        ' ticker is not registered.')
             return bad_request('One of the traders or ticker is not '
                                'registered.')
 
@@ -352,7 +371,114 @@ class StockExchange():
                 Trader.objects.get(name=trader).update_portfolio(
                     positions[trader])
 
+        log.info('Successfully edited all positions.')
         return good_request('Positions updated successfully.')
+
+    def get_price_history(self, ticker):
+        """Retrieves a security price history.
+
+        Args:
+            ticker (str): The security code.
+
+        """
+        try:
+            book = OrderBook.objects.get(ticker=ticker)
+        except Exception:
+            return bad_request('The security code doesn\'t exist')
+
+        return good_request([datum.to_dict() for datum in
+                             book.price_history])
+
+    def yaml_load(self, path):
+        """Loads the database with the configurations defined on a yaml file.
+
+        Below is and examplo of yaml file with a valid configuration.
+
+        Example:
+            traders:
+                - name: 'John Doe'
+                  wallet: 30000
+                  portfolio:
+                    BBVA03: 4300
+                    LLCA13: 33421000
+                    RRTV99: 3939300
+
+                - name: 'Jane Gin'
+                  wallet: 40000
+
+            tickers:
+                - BBVA03
+                - LLCA13
+                - RRTV99
+                - KKLE64
+                - ASDF12
+
+        Args:
+            path (str): The path of the yaml file.
+
+        """
+        log.info('Loading configurations from the file %s', path)
+        with open(path) as f:
+            configs = yaml.safe_load(f)
+
+        if 'tickers' in configs:
+            for ticker in configs['tickers']:
+                self.register_security(ticker)
+
+        if 'traders' in configs:
+            for trader in configs['traders']:
+                wallet = None
+                if 'wallet' in trader:
+                    wallet = Decimal(trader['wallet'])
+
+                self.register_trader(
+                    **{'name': trader['name'],
+                       'wallet': wallet,
+                       'portfolio': trader.get('portfolio', None)})
+
+    def get_book(self, ticker):
+        """Retrieves a security OrderBook information.
+
+        Args:
+            ticker (str): The security code.
+
+        """
+        try:
+            book = OrderBook.objects.get(ticker=ticker)
+            return good_request(book.to_dict())
+        except Exception:
+            return bad_request('The ticker doesn\'t exists.')
+
+    def run(self):
+        """The thread responsible for continuously matching the top orders."""
+        while True:
+            for book in OrderBook.objects:
+                book.try_match()
+
+    def _random_ticker(self, num_letters=4, num_digits=2):
+        """Generates a random security code (ticker).
+
+        The generated ticker will have the form <letters><numbers>.
+
+        Examples:
+            AAKL32, BSUE34, NDUR09
+
+        Keyword Args:
+            num_letters (int, default=4): The number of letters to be used on
+                the ticker.
+            num_digits (int, default=2): The number of digits to be used on
+                the ticker.
+
+        Returns:
+            str: the random ticker.
+
+        """
+        letters = ''.join(random.choices(string.ascii_uppercase,
+                                         k=num_letters))
+
+        digits = ''.join(random.choices(string.digits, k=num_digits))
+
+        return letters + digits
 
 
 class Fill(Document):
@@ -388,10 +514,13 @@ class Fill(Document):
     seller = ReferenceField('Trader', required=True)
     buyer = ReferenceField('Trader', required=True)
     size = IntField(min_value=1, required=True)
-    price = DecimalField(min_value=0.01, precision=2, required=True)
+    price = DecimalField(min_value=0, precision=2, required=True)
     time = DateTimeField(default=datetime.now(), required=True)
 
     def to_dict(self):
+        """Converts the object to a dict."""
+        # Warning: don't overwrite the __iter__ method otherwise it will
+        # interfere with the mongoengine.
         return {
             'order': str(self.order.id),
             'seller': str(self.seller.name),
@@ -434,16 +563,19 @@ class Position(Document):
 
         return Decimal('0.00')
 
-    def __repr__(self):
-        return 'Position(trader=%s, ticker=%s, shares=%s)' % \
-            (self.trader.name, self.order_book.ticker, self.shares)
-
     def to_dict(self):
+        """Converts the object to a dict."""
+        # Warning: don't overwrite the __iter__ method otherwise it will
+        # interfere with the mongoengine.
         return {
             'trader': str(self.trader.name),
             'ticker': str(self.order_book.ticker),
             'shares': str(self.shares),
             'value': str(self.value)}
+
+    def __repr__(self):
+        return 'Position(trader=%s, ticker=%s, shares=%s)' % \
+            (self.trader.name, self.order_book.ticker, self.shares)
 
 
 class ValueDatum(EmbeddedDocument):
@@ -454,16 +586,21 @@ class ValueDatum(EmbeddedDocument):
         time (datetime): The datum time.
 
     """
-    value = DecimalField(min_value=0.01, precision=2, required=True)
+    value = DecimalField(min_value=0, precision=2, required=True)
+    amount = IntField(min_value=0)
     time = DateTimeField(required=True)
 
-    def __repr__(self):
-        return '[' + str(time) + '] ' + str(value)
-
     def to_dict(self):
+        """Converts the object to a dict."""
+        # Warning: don't overwrite the __iter__ method otherwise it will
+        # interfere with the mongoengine.
         return {
             'value': str(self.value),
-            'time': str(self.time)}
+            'time': str(self.time),
+            'amount': str(self.amount)}
+
+    def __repr__(self):
+        return '[' + str(self.time) + '] ' + str(self.value)
 
 
 class Trader(Document):
@@ -475,7 +612,7 @@ class Trader(Document):
 
     Attributes:
         name (str): The name of the trader.
-        wallet (Decimal): The ammout of money that the trader has.
+        wallet (Decimal): The amount of money that the trader has.
         wallet_history (list(ValueDatum)): The history of the trader's wallet.
         portfolio (Portfolio): The trader's portfolio.
         orders (list(Order)): A list with all the orders sent by the trader.
@@ -497,10 +634,9 @@ class Trader(Document):
 
     def update_wallet_history(self):
         """Updates the wallet_history time series."""
-        if self.wallet != self.wallet_history.objects.order_by('-time').value:
-            self.wallet_history += [ValueDatum(time=datetime.now(),
-                                               value=self.wallet)]
-            self.save()
+        self.wallet_history += [ValueDatum(time=datetime.now(),
+                                           value=self.wallet)]
+        self.save()
 
     def send_order(self, ticker, side, size, price=None,
                    market_order=False):
@@ -550,7 +686,6 @@ class Trader(Document):
         self.save()
 
         log.info('Order sent! (%s)', repr(order))
-        book.try_match()
 
         return order
 
@@ -558,7 +693,7 @@ class Trader(Document):
         """Adds a value to the trader's wallet.
 
         Args:
-            delta (Decimal): The ammout of money to be added to the trader's
+            delta (Decimal): The amount of money to be added to the trader's
                 wallet.
 
         """
@@ -577,6 +712,9 @@ class Trader(Document):
         return t_value
 
     def to_dict(self):
+        """Converts the object to a dict."""
+        # Warning: don't overwrite the __iter__ method otherwise it will
+        # interfere with the mongoengine.
         return {
             'name': self.name,
             'wallet': str(self.wallet),
@@ -587,6 +725,13 @@ class Trader(Document):
             'orders': [order.to_dict() for order in self.orders]}
 
     def update_portfolio(self, new_positions):
+        """Updates the trader's positions.
+
+        Args:
+            new_positions (dict): A dict representing the trader's new
+                positions ({'LLVM34': 34000, 'LLCD93': 90000})
+
+        """
         for key, value in new_positions.items():
             book = OrderBook.objects.get(ticker=key)
             try:
@@ -663,8 +808,8 @@ class Order(Document):
             * None of them were cancelled or filled.
             * Both order are on oposite sides (one is an Ask and the other is a
                 Bid).
-            * Both orders have the same price or at least one of them is an `at
-                market price` order.
+            * The Bid price is greater or equal than the ask price or at least
+                one of them is an `at market price` order.
             * The buyier can pay for the transaction.
             * The seller has the securities.
 
@@ -702,14 +847,24 @@ class Order(Document):
                      ' order type).', repr(self), repr(order))
             return False
 
+        if self.order_type == 'Bid':
+            bid_order = self
+            ask_order = order
+        else:
+            bid_order = self
+            ask_order = order
+
+        ask_price = ask_order.price
+        bid_price = bid_order.price
+
         # Are both order prices compatible?
-        if self.price != order.price and (not self.market_order) \
-           and (not oder.market_order):
+        if (not self.market_order) and (not order.market_order) \
+           and bid_price < ask_price:
             log.info('Orders %s and %s not matched (they have different '
                      ' prices).', repr(self), repr(order))
             return False
 
-        fill_ammout = min(self.current_size, order.current_size)
+        fill_amount = min(self.current_size, order.current_size)
 
         if self.order_type == 'Ask':
             buyer = order.trader
@@ -718,10 +873,10 @@ class Order(Document):
             seller = order.trader
             buyer = self.trader
 
-        if not self.market_order:
-            price = self.price
-        elif not order.market_order:
-            price = order.price
+        if not ask_order.market_order:
+            price = ask_price
+        elif not bid_order.market_order:
+            price = bid_price
         elif market_price is not None:
             price = market_price
         else:
@@ -731,7 +886,7 @@ class Order(Document):
             return False
 
         # Can the buyer pay for the fill?
-        if buyer.wallet < fill_ammout * price:
+        if buyer.wallet < fill_amount * price:
             # Canceling the order
             if self.trader == buyer:
                 self.canceled = True
@@ -746,7 +901,7 @@ class Order(Document):
         try:
             seller_position = Position.objects.get(trader=seller,
                                                    order_book=self.order_book)
-            if seller_position.shares < fill_ammout:
+            if seller_position.shares < fill_amount:
                 # Canceling the order
                 if self.trader == seller:
                     self.canceled = True
@@ -762,11 +917,11 @@ class Order(Document):
                      ' have the securities).', repr(self), repr(order))
             return False
 
-        self.current_size -= fill_ammout
-        order.current_size -= fill_ammout
+        self.current_size -= fill_amount
+        order.current_size -= fill_amount
 
         # Creating the fill
-        fill = Fill(order=self, seller=seller, buyer=buyer, size=fill_ammout,
+        fill = Fill(order=self, seller=seller, buyer=buyer, size=fill_amount,
                     price=price, time=datetime.now())
 
         fill.save()
@@ -785,17 +940,26 @@ class Order(Document):
         order.save()
 
         # Updating the traders positions
-        seller_position.shares -= fill_ammout
+        seller_position.shares -= fill_amount
         try:
             buyer_position = Position.objects.get(trader=buyer,
                                                   order_book=self.order_book)
         except Exception:
             buyer_position = Position(trader=buyer, order_book=self.order_book)
 
-        buyer_position.shares += fill_ammout
+        buyer_position.shares += fill_amount
 
         seller_position.save()
         buyer_position.save()
+
+        ask_order.trader.wallet += fill_amount * price
+        bid_order.trader.wallet -= fill_amount * price
+
+        ask_order.trader.save()
+        bid_order.trader.save()
+
+        ask_order.trader.update_wallet_history()
+        bid_order.trader.update_wallet_history()
 
         log.info('Orders %s and %s matched (fill: %s).', repr(self),
                  repr(order), repr(fill))
@@ -805,6 +969,9 @@ class Order(Document):
         return fill
 
     def to_dict(self):
+        """Converts the object to a dict."""
+        # Warning: don't overwrite the __iter__ method otherwise it will
+        # interfere with the mongoengine.
         return {
             'trader': str(self.trader.name),
             'ticker': str(self.order_book.ticker),
@@ -862,17 +1029,15 @@ class OrderBook(Document):
         top_bid = self.get_top_bid()
         top_ask = self.get_top_ask()
 
-        print(top_bid)
-        print(top_ask)
-
         if top_bid is not None and top_ask is not None:
             fill = top_bid.match(top_ask, market_price=self.get_market_price())
 
             if fill:
-                datum = ValueDatum(time=fill.time, value=fill.price)
+                datum = ValueDatum(time=fill.time, value=fill.price,
+                                   amount=fill.size)
+
                 self.price_history += [datum]
                 self.save()
-                self.try_match()
         else:
             log.info('Not enough orders to try a match on the book %s.',
                      repr(self))
@@ -976,6 +1141,27 @@ class OrderBook(Document):
         else:
             return Decimal('0.00')
 
+    def to_dict(self):
+        """Converts the object to a dict."""
+        # Warning: don't overwrite the __iter__ method otherwise it will
+        # interfere with the mongoengine.
+
+        # TODO add market depth info
+        result = {
+            'ticker': self.ticker,
+            'market_price': str(self.get_market_price()),
+            'price_history': [datum.to_dict() for datum in self.price_history]}
+
+        top_ask = self.get_top_ask()
+        if top_ask is not None:
+            result['top_ask'] = top_ask.to_dict()
+
+        top_bid = self.get_top_bid()
+        if top_bid is not None:
+            result['top_bid'] = top_bid.to_dict()
+
+        return result
+
     def __repr__(self):
         return 'OrderBook(ticker=' + self.ticker + ')'
 
@@ -988,6 +1174,7 @@ class OrderBook(Document):
         try:
             total_bids = len(Order.objects(order_type='Bid', canceled=False,
                                            filled=False))
+
         except Exception:
             pass
 
@@ -997,14 +1184,9 @@ class OrderBook(Document):
         try:
             total_aks = len(Order.objects(order_type='Ask', canceled=False,
                                           filled=False))
+
         except Exception:
             pass
 
         result += '\tActive Asks: ' + str(total_aks) + '\n'
         return result
-
-    def to_dict(self):
-        # TODO add market depth info
-        return{
-            'ticker': self.ticker,
-            'price_history': [datum.to_dict() for datum in self.price_history]}

@@ -1,6 +1,28 @@
 #!flask/bin/python
 # -*- coding: utf-8 -*-
-# from decimal import Decimal
+"""A micro Stock Market Simulator.
+
+This module implements the RESTful API of a Stock Exchange.
+
+To see all the execution options, run:
+    $ python server.py -h
+
+Todo:
+    * Add the Registers a new security view
+
+.. _uStockMarket Project:
+    https://github.com/luizsol/uStockMarket
+
+"""
+__author__ = 'Luiz Sol'
+__license__ = 'MIT'
+__version__ = '0.0.1'
+__date__ = '2017-10-05'
+__maintainer__ = 'Luiz Sol'
+__email__ = 'luizedusol@gmail.com'
+__status__ = 'Development'
+
+import argparse
 from decimal import Decimal
 
 from flask import Flask, request
@@ -8,14 +30,34 @@ from flask_restful import reqparse, Api, Resource
 
 from u_stock_market import StockExchange, log
 
-sx = StockExchange()
+# Adding the terminal options
+
+parser = argparse.ArgumentParser(description='Runs the uStockMarket server.')
+parser.add_argument('-c', metavar='--clean_start', nargs='?', default=True,
+                    type=bool, help='true if the whole database should be '
+                                    'erased before starting the server '
+                                    '(default=true).')
+
+parser.add_argument('-f', metavar='--config_file', nargs='?', default=None,
+                    help='An yaml file containing the inititial market'
+                         ' configuration.')
+
+parser.add_argument('-d', metavar='--debug', nargs='?', default=True,
+                    type=bool, help='true if the server should run on debug '
+                                    'mode (default=true).')
+
+args = parser.parse_args()
+
+sx = StockExchange(config_file=args.f, clean_start=args.c, debug_mode=args.d)
+sx.start()
+
 app = Flask(__name__)
 api = Api(app)
 
 
 # ====== System methods ======
 # -Erases all the database
-class CleanHistory(Resource):  # TODO test!
+class CleanHistory(Resource):
     def get(self):
         log.debug('/clean_history (get): ')
         return sx.clean_history()
@@ -57,6 +99,17 @@ class RegisterTrader(Resource):
 
 api.add_resource(RegisterTrader, '/register_trader')
 
+# -List traders
+
+
+class ListTraders(Resource):
+    def get(self):
+        log.debug('/list_traders (get): ')
+        return sx.list_traders()
+
+
+api.add_resource(ListTraders, '/list_traders')
+
 
 # -Get trader status
 class TraderStatus(Resource):
@@ -93,7 +146,7 @@ class SendOrder(Resource):
         if args['price'] is not None:
             args['price'] = Decimal(args['price'])
 
-        log.debug('/send_order (put): ' + str(args))
+        log.debug('/send_order (put/post): ' + str(args))
         return sx.send_order(**args)
 
     def post(self):
@@ -108,7 +161,7 @@ api.add_resource(SendOrder, '/send_order')
 class EditPositions(Resource):
     def put(self):
         args = request.get_json()
-        log.debug('/edit_positions (put): ' + str(args))
+        log.debug('/edit_positions (put/post): ' + str(args))
         return sx.edit_positions(args)
 
     def post(self):
@@ -118,6 +171,26 @@ class EditPositions(Resource):
 api.add_resource(EditPositions, '/edit_positions')
 
 # ====== OrderBook methods ======
+# -Registers a new security
+
+register_security_parser = reqparse.RequestParser()
+register_security_parser.add_argument('ticker', type=str, help='The security '
+                                                               'code. ')
+
+
+class RegisterSecurity(Resource):  # FIXME not working ('ticker' recieves None)
+    def put(self):
+        args = register_security_parser.parse_args()
+        log.debug('/register_security (put/post): ' + str(args))
+        print(args)
+        return sx.register_security(args['ticker'])
+
+    def post(self):
+        return self.put()
+
+
+api.add_resource(RegisterSecurity, '/register_security')
+
 # -List all securities
 
 
@@ -130,13 +203,26 @@ class ListTickers(Resource):
 api.add_resource(ListTickers, '/list_tickers')
 
 # -Get security price history
-# TODO
+
+
+class PriceHistory(Resource):
+    def get(self, ticker):
+        log.debug('/price_history/%s (get): ' % (ticker))
+        return sx.get_price_history(ticker)
+
+
+api.add_resource(PriceHistory, '/price_history/<ticker>')
 
 # -Get security order book
-# TODO
 
-# -Registers a new security
-# TODO
+
+class Book(Resource):
+    def get(self, ticker):
+        log.debug('/book/%s (get): ' % (ticker))
+        return sx.get_book(ticker)
+
+
+api.add_resource(Book, '/book/<ticker>')
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=args.d)

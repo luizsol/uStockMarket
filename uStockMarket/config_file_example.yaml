@@ -1,0 +1,17 @@
+traders:
+    - name: 'John Doe'
+      wallet: 30000
+      portfolio:
+        BBVA03: 4300
+        LLCA13: 33421000
+        RRTV99: 3939300
+
+    - name: 'Jane Gin'
+      wallet: 40000
+
+tickers:
+    - BBVA03
+    - LLCA13
+    - RRTV99
+    - KKLE64
+    - ASDF12
